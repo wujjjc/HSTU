@@ -6,7 +6,7 @@ PyTorch implementation of the HSTU model from Meta's paper *"Actions Speak Loude
 
 ## Model Architecture
 
-HSTU is a Transformer-based sequential recommendation model with the following key designs:
+HSTU is a sequential recommendation model with the following key designs:
 
 - **SiLU Attention**: Replaces softmax with SiLU activation for attention scores, combined with relative position and time biases (RAB)
 - **Single UVQK Projection**: A single linear layer projects input into U, V, Q, K components, reducing parameter count
@@ -98,7 +98,7 @@ Training logs and evaluation metrics are saved to `train_log.txt` and `test_log.
 
 ## 模型架构
 
-HSTU 是一种基于 Transformer 的序列推荐模型，具有以下核心设计：
+HSTU 是一种序列推荐模型，具有以下核心设计：
 
 - **SiLU 注意力**：用 SiLU 激活函数替代 softmax，结合相对位置和时间偏置（RAB）
 - **单一 UVQK 投影**：一个线性层将输入投影为 U、V、Q、K 四个分量，减少参数量
