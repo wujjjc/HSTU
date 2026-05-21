@@ -140,8 +140,10 @@ def load_ratings(rating_file):
         rating_file (_type_): ratings.dat 文件路径
     return:
         user_movie_dict: {user_id: [(movie_id, timestamp, rating), ...], ...}} (排序好了的)
+        item_num: 物品数量
     """
     user_movie_dict = {}
+    item_num = 0
     print("开始读取数据...")
     for line in open(rating_file):
         user_id, movie_id, rating, timestamp = line.strip().split("::")
@@ -149,14 +151,15 @@ def load_ratings(rating_file):
         movie_id = int(movie_id)
         rating = int(rating)
         timestamp = int(timestamp)
+        item_num = max(item_num, movie_id)
         user_movie_dict.setdefault(user_id, [])
         user_movie_dict[user_id].append((movie_id, timestamp, rating))
     print("数据读取完成！")
     for user, lst in user_movie_dict.items():
         user_movie_dict[user] = sorted(lst, key=lambda x: x[1]) # 按照时间戳排序
-    return user_movie_dict
+    return user_movie_dict, item_num
 
-def split_data(user_movie_dict):
+def split_data(user_movie_dict, neg_num=100):
     """_summary_
     进行训练集验证集划分，最后一个movie作为测试集，其他的作为训练集
 
@@ -168,40 +171,59 @@ def split_data(user_movie_dict):
             'sequence': [[movie_id1, movie_id2, ...], ...],
             'timestamp': [[timestamp1, timestamp2, ...], ...],
             'rating': [[rating1, rating2, ...], ...],
+            'target':[[movie_id1], [movie_id2], ...] 召回目标
+            'neg_items': [[neg_movie_id1, neg_movie_id2, ...], ...] 负采样的电影id
         }
         test_dict:{
             'sequence': [[movie_id1, movie_id2, ...], ...],
             'timestamp': [[timestamp1, timestamp2, ...], ...],
             'rating': [[rating1, rating2, ...], ...],
             'target':[[movie_id1], [movie_id2], ...] 召回目标
+            'neg_items': [[neg_movie_id1, neg_movie_id2, ...], ...] 负采样的电影id
         }
     """
     train_dict = {
         'sequence': [],
         'timestamp': [],
         'rating': [],
-        'target':[]
+        'target':[],
+        'neg_items':[]
     }
     test_dict = {
         'sequence': [],
         'timestamp': [],
         'rating': [],
-        'target':[]
+        'target':[],
+        'neg_items':[]
     }
+    all_items = set()
+    for lst in user_movie_dict.values():
+        for movie_id, _, _ in lst:
+            all_items.add(movie_id)
+    all_items = list(all_items)
     for user, lst in user_movie_dict.items():
         if len(lst) < 2:
-            continue
+            continue 
         seq = [x[0] for x in lst]
+        movie_set = set(seq)
+        neg_items = []
+        import random
+        while len(neg_items) < neg_num:
+            neg_item = random.choice(all_items)
+            if neg_item not in movie_set and neg_item not in neg_items:
+                neg_items.append(neg_item)
         timestamp = [x[1] for x in lst]
         rating = [x[2] for x in lst]
-        train_dict['sequence'].append(seq[:-1])
-        train_dict['timestamp'].append(timestamp[:-1])
-        train_dict['rating'].append(rating[:-1])
-        train_dict['target'].append([seq[-1]])
+        train_dict['sequence'].append(seq[:-2])
+        train_dict['timestamp'].append(timestamp[:-2])
+        train_dict['rating'].append(rating[:-2])
+        train_dict['target'].append([seq[-2]])
         test_dict['sequence'].append(seq[:-1])
         test_dict['timestamp'].append(timestamp[:-1])
         test_dict['rating'].append(rating[:-1])
         test_dict['target'].append([seq[-1]])
+        test_dict['neg_items'].append(neg_items)
+        train_dict['neg_items'].append(neg_items)
     return train_dict, test_dict
 
 import torch
@@ -219,9 +241,10 @@ class MovieDataset(data.Dataset):
         timestamp = self.data['timestamp'][idx]
         rating = self.data['rating'][idx]
         target = self.data['target'][idx]
-        return sequence, timestamp, rating, target
+        neg_items = self.data['neg_items'][idx]
+        return sequence, timestamp, rating, target, neg_items
 
-def collate_fn(batch, max_len=1024, rating_threshold=1):
+def collate_fn(batch, max_len=256, rating_threshold=2):
     """_summary_
     返回所需要的数据格式，主要是进行padding
     Args:
@@ -233,14 +256,16 @@ def collate_fn(batch, max_len=1024, rating_threshold=1):
             'targets': [batch_size, 1]
             'masks': [batch_size, seq_len]
             'vaild_masks': [batch_size, seq_len] 这个为了区别是否需要在这个位置进行训练，不是所有的评分电影用户都喜欢的
+            'neg_items': [batch_size, neg_num]
         }
         """
     sequences = []
     timestamps = []
-    targets = [torch.tensor(x[-1], dtype=torch.long) for x in batch]
+    targets = [torch.tensor(x[-2], dtype=torch.long) for x in batch]
+    neg_items = [torch.tensor(x[-1], dtype=torch.long) for x in batch]
     pad_masks = []
     vaild_masks = []
-    for seq, times, rat, _ in batch:
+    for seq, times, rat, _, _ in batch:
         seq_len = len(seq)
         if seq_len > max_len:
             seq = seq[-max_len:]
@@ -254,6 +279,7 @@ def collate_fn(batch, max_len=1024, rating_threshold=1):
             rat = [0] * padding_len + rat
         padding_mask = [0] * padding_len + [1] * (max_len - padding_len)
         vaild_mask = [1 if r >= rating_threshold else 0 for r in rat] # 只有评分大于等于rating_threshold的电影才是用户喜欢的电影，才需要在这个位置进行训练
+        vaild_mask = vaild_mask[1:] + [1] # 预测下一个电影，所以最后一个位置不需要训练
         sequences.append(torch.tensor(seq, dtype=torch.long))
         timestamps.append(torch.tensor(times, dtype=torch.long))
         pad_masks.append(torch.tensor(padding_mask, dtype=torch.bool))
@@ -263,5 +289,6 @@ def collate_fn(batch, max_len=1024, rating_threshold=1):
         'timestamps': torch.stack(timestamps),
         'targets': torch.stack(targets),
         'masks': torch.stack(pad_masks),
-        'vaild_masks': torch.stack(vaild_masks)
+        'vaild_masks': torch.stack(vaild_masks),
+        'neg_items': torch.stack(neg_items)
     }
